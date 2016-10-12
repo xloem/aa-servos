@@ -7,17 +7,26 @@
  http://www.arduino.cc/en/Tutorial/Knob
 */
 
+#pragma GCC diagnostic error "-Wall"
+
 #include <Servo.h>
 
 typedef unsigned long microsec_t;
 typedef float degree_t;
+typedef unsigned long millidegree_t;
 
-struct ServoSpecification
+template <
+  microsec_t _pulseCycle,
+  microsec_t _pulseWidthMin,
+  microsec_t _pulseWidthMax,
+  millidegree_t _rotationalRange
+> class ServoSpecification
 {
-  microsec_t pulseCycle;
-  microsec_t pulseWidthMin;
-  microsec_t pulseWidthMax;
-  degree_t rotationalRange;
+public:
+  static constexpr microsec_t pulseCycle = _pulseCycle;
+  static constexpr microsec_t pulseWidthMin = _pulseWidthMin;
+  static constexpr microsec_t pulseWidthMax = _pulseWidthMax;
+  static constexpr degree_t rotationalRange = _rotationalRange / 1000.0;
 };
 
 class ServoImplementation
@@ -25,37 +34,42 @@ class ServoImplementation
 public:
   virtual float operator=(float amount) = 0;
   virtual operator float() = 0;
-  virtual void update();
+  virtual void update() {}
   virtual void disengage() = 0;
 };
 
-void ServoImplementation::update() {}
+typedef ServoSpecification<20000, 450, 2450, 180000> HXT900;
 
-constexpr ServoSpecification HXT900{20000, 450, 2450, 180};
-
-template <int pin, ServoSpecification const & specification>
-class ArduinoLibraryServo : public ServoImplementation
+template <int pin, typename ServoSpecification>
+class ArduinoLibraryServo : public ServoImplementation, ServoSpecification
 {
+  using S = ServoSpecification;
 public:
+  using S::pulseCycle;
+  using S::pulseWidthMin;
+  using S::pulseWidthMax;
+  using S::rotationalRange;
+
   float operator=(float amount)
   {
     if (!servo.attached())
-      servo.attach(pin, specification.pulseWidthMin, specification.pulseWidthMax);
-    servo.writeMicroseconds(amount * (specification.pulseWidthMax - specification.pulseWidthMin) + specification.pulseWidthMin + 0.5);
+      servo.attach(pin, pulseWidthMin, pulseWidthMax);
+    servo.writeMicroseconds(amount * (pulseWidthMax - pulseWidthMin) + pulseWidthMin + 0.5);
     lastWrite = micros();
+    return (servo.readMicroseconds() - pulseWidthMin) / float(pulseWidthMax - pulseWidthMin);
   }
 
   operator float()
   {
-    return float(servo.readMicroseconds() - specification.pulseWidthMin) / (specification.pulseWidthMax - specification.pulseWidthMin);
+    return float(servo.readMicroseconds() - pulseWidthMin) / (pulseWidthMax - pulseWidthMin);
   }
   
   void disengage()
   {
     microsec_t delay = micros() - lastWrite;
   
-    if (delay < specification.pulseCycle) {
-      delayMicroseconds(specification.pulseCycle - delay);
+    if (delay < pulseCycle) {
+      delayMicroseconds(pulseCycle - delay);
     }
 
     servo.detach();
@@ -66,10 +80,16 @@ private:
   microsec_t lastWrite;
 };
 
-template <int pin, ServoSpecification const & specification>
-class NoInterruptServo : public ServoImplementation
+template <int pin, typename ServoSpecification>
+class NoInterruptServo : public ServoImplementation, ServoSpecification
 {
+  using S = ServoSpecification;
 public:
+  using S::pulseCycle;
+  using S::pulseWidthMin;
+  using S::pulseWidthMax;
+  using S::rotationalRange;
+
   NoInterruptServo()
   : engaged(false)
   {
@@ -83,14 +103,15 @@ public:
       engaged = true;
       disengaging = false;
       pulsing = false;
-      cycleStart = micros() - specification.pulseCycle;
+      cycleStart = micros() - pulseCycle;
     }
-    pulseWidth = amount * (specification.pulseWidthMax - specification.pulseWidthMin) + specification.pulseWidthMin + 0.5;
+    pulseWidth = amount * (pulseWidthMax - pulseWidthMin) + pulseWidthMin + 0.5;
+    return (pulseWidth - pulseWidthMin) / float(pulseWidthMax - pulseWidthMin);
   }
 
   operator float()
   {
-    return float(pulseWidth - specification.pulseWidthMin) / (specification.pulseWidthMax - specification.pulseWidthMin);
+    return float(pulseWidth - pulseWidthMin) / (pulseWidthMax - pulseWidthMin);
   }
 
   void disengage()
@@ -110,7 +131,7 @@ public:
       }
     } else { // already pulsed
       microsec_t now = micros();
-      if (now - cycleStart >= specification.pulseCycle) {
+      if (now - cycleStart >= pulseCycle) {
         digitalWrite(pin, HIGH);
         pulsing = true;
         cycleStart = now;
@@ -135,13 +156,13 @@ public:
   {
     pinMode(pin, INPUT);
   }
-  operator float()
+  operator double()
   {
     return analogRead(pin) / 1023.0;
   }
 };
 
-template <int baud>
+template <unsigned long baud>
 class ArduinoLibrarySerial
 {
 public:
@@ -150,31 +171,37 @@ public:
     Serial.begin(baud);
   }
 
-  int printf(const char *format, ...)
+  ArduinoLibrarySerial & operator<<(double v)
   {
-    char buffer[1024];
-    int done;
-    
-    va_list arg;
-    va_start(arg, format);
-    done = vsnprintf(buffer, sizeof(buffer), format, arg);
-    va_end(arg);
+    Serial.print(v, 4);
+    return *this;
+  }
 
-    Serial.write(buffer);
+  ArduinoLibrarySerial & operator<<(const char * s)
+  {
+    Serial.print(s);
+    return *this;
+  }
 
-    return done;
+  ArduinoLibrarySerial & operator<<(char c)
+  {
+    Serial.print(c);
+    return *this;
   }
 };
 
 
-NoInterruptServo<9, HXT900> servo;
-AnalogInput<0> potentiometer;
-AnalogInput<3> currentProbe;
-ArduinoLibrarySerial<115200> serial;
+void setup() {
+  ArduinoLibraryServo<9, HXT900> servo;
+  AnalogInput<0> potentiometer;
+  AnalogInput<3> currentProbe;
+  ArduinoLibrarySerial<115200> serial;
 
-void loop() {
-  float amount = potentiometer;
-  servo = amount;
-  serial.printf("%f,%f,%f\n", amount, servo, currentProbe);
+  for (;;) {
+    serial << potentiometer << ',' << currentProbe << ',' << (servo = potentiometer) << '\n';
+    servo.update();
+  }
 }
+
+void loop() {}
 
